@@ -9,6 +9,23 @@ export type ClipboardImage = {
 };
 
 const PNG_MIME = "image/png";
+
+// PowerShell script used on Windows to read a PNG image from the clipboard.
+// It must run inside an STA-marked thread because
+// System.Windows.Forms.Clipboard.GetImage() throws a ThreadStateException on
+// the default MTA thread. The image bytes are written directly to stdout.
+export const WIN32_CLIPBOARD_SCRIPT =
+  "$code = {" +
+  "Add-Type -AssemblyName System.Windows.Forms;" +
+  "$img = [System.Windows.Forms.Clipboard]::GetImage();" +
+  "if ($img) { $ms = New-Object System.IO.MemoryStream;" +
+  "$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);" +
+  "$bytes = $ms.ToArray();" +
+  "[Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length); } };" +
+  "$thread = New-Object System.Threading.Thread($code, $true);" +
+  "$thread.SetApartmentState('STA');" +
+  "$thread.Start();" +
+  "$thread.Join();";
 const IMAGE_MIME_BY_EXT = new Map([
   [".png", "image/png"],
   [".jpg", "image/jpeg"],
@@ -127,13 +144,13 @@ export function readClipboardImage(): ClipboardImage | null {
   }
 
   if (process.platform === "win32") {
-    const script =
-      "Add-Type -AssemblyName System.Windows.Forms;" +
-      "$img = [System.Windows.Forms.Clipboard]::GetImage();" +
-      "if ($img) { $ms = New-Object System.IO.MemoryStream;" +
-      "$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);" +
-      "[Console]::OpenStandardOutput().Write($ms.ToArray(), 0, $ms.Length); }";
-    const out = tryRun("powershell", ["-NoProfile", "-Command", script]);
+    // System.Windows.Forms.Clipboard.GetImage() can only be called from a
+    // thread running in Single-Threaded Apartment (STA) mode. A normal
+    // `powershell -Command` invocation runs on an MTA thread, where the call
+    // throws a ThreadStateException and silently produces no output — which is
+    // why Ctrl+V paste of a screenshot appears to "do nothing". Wrapping the
+    // read in an explicitly STA-marked thread fixes this.
+    const out = tryRun("powershell", ["-NoProfile", "-Command", WIN32_CLIPBOARD_SCRIPT]);
     if (out && out.length > 0) {
       return { dataUrl: bufferToDataUrl(out, PNG_MIME), mimeType: PNG_MIME };
     }
